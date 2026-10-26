@@ -47,7 +47,7 @@ const std::vector<CommandInfo>& command_table() {
             {"bombinhas", "bombinha"}},
         {Command::Slingshot, "Slingshot", "Estilingue",
             {"slingshot", "sling shot"},
-            {"estilingue", "bodoque"}},
+            {"estilingue"}},
         {Command::FishingRod, "Fishing Rod", "Vara de Pescar",
             {"fishing rod", "fishing"},
             {"vara de pescar", "vara"}},
