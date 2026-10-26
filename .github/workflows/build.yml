@@ -78,10 +78,12 @@ jobs:
               n=$((n+1))
               espeak-ng -v "$voice" -s 130 -w "wav/$lang/$n.wav" "$phrase"
               args+=("wav/$lang/$n.wav=$idx")
-              echo "$n: $phrase" >> "wav/$lang/index.txt"
             done < <(./build/voice_recognize "$lib" build/voice_res/models/$lang $lang --phrases)
-            ./build/voice_recognize "$lib" build/voice_res/models/$lang $lang "${args[@]}" || status=1
-            cat "wav/$lang/index.txt"
+            out=$(./build/voice_recognize "$lib" build/voice_res/models/$lang $lang "${args[@]}" 2>&1) || status=1
+            echo "$out"
+            # Also publish the report as an annotation so it is readable from the API.
+            msg=$(printf '%s' "$out" | sed -e ':a;N;$!ba' -e 's/%/%25/g' -e 's/\r/%0D/g' -e 's/\n/%0A/g')
+            echo "::notice title=recognition-$lang::$msg"
           done
           exit $status
 
