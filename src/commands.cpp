@@ -13,10 +13,10 @@ const std::vector<CommandInfo>& command_table() {
             {"iron boots", "iron boot", "heavy boots", "boots"},
             {"botas de ferro", "bota de ferro", "botas", "bota"}},
         {Command::Clawshot, "Clawshot", "Gancho",
-            {"claw shot", "clawshot", "hook shot", "hookshot", "hook"},
+            {"claw shot", "hook shot", "hook"},
             {"gancho", "garra"}},
         {Command::DoubleClawshot, "Double Clawshots", "Gancho Duplo",
-            {"double claw shot", "double clawshot", "double claw", "double hook"},
+            {"double claw shot", "double claw", "double hook", "double hook shot"},
             {"gancho duplo", "ganchos duplos", "garra dupla"}},
         {Command::Boomerang, "Gale Boomerang", "Bumerangue",
             {"boomerang", "gale boomerang"},
@@ -29,7 +29,7 @@ const std::vector<CommandInfo>& command_table() {
             {"lanterna", "lamparina"}},
         {Command::Spinner, "Spinner", "Pião",
             {"spinner"},
-            {"pião", "girador"}},
+            {"pião", "peão"}},
         {Command::BallAndChain, "Ball and Chain", "Bola de Ferro",
             {"ball and chain", "iron ball"},
             {"bola de ferro", "bola e corrente"}},
@@ -43,11 +43,11 @@ const std::vector<CommandInfo>& command_table() {
             {"water bombs", "water bomb"},
             {"bombas aquáticas", "bomba aquática", "bombas de água"}},
         {Command::Bomblings, "Bomblings", "Bombinhas",
-            {"bomblings", "bombling", "bug bombs"},
+            {"bug bombs", "bug bomb", "little bombs"},
             {"bombinhas", "bombinha"}},
         {Command::Slingshot, "Slingshot", "Estilingue",
             {"slingshot", "sling shot"},
-            {"estilingue", "atiradeira", "baladeira"}},
+            {"estilingue", "bodoque"}},
         {Command::FishingRod, "Fishing Rod", "Vara de Pescar",
             {"fishing rod", "fishing"},
             {"vara de pescar", "vara"}},
@@ -55,8 +55,8 @@ const std::vector<CommandInfo>& command_table() {
             {"hawk eye", "hawkeye"},
             {"olho de falcão", "olho de águia"}},
         {Command::HorseCall, "Horse Call", "Chamar Cavalo",
-            {"horse call", "horse", "epona"},
-            {"chamar cavalo", "cavalo", "epona"}},
+            {"horse call", "horse", "call horse"},
+            {"chamar cavalo", "cavalo", "chamar o cavalo"}},
         {Command::Bottle, "Bottle", "Garrafa",
             {"bottle"},
             {"garrafa"}},
@@ -156,30 +156,91 @@ std::string grammar_json(const std::vector<std::string>& list) {
     return json;
 }
 
-bool match(std::string_view text, Language language, Command& out) {
-    const std::string normalized = normalize(text);
-    if (normalized.empty() || normalized == "[unk]") {
+namespace {
+
+bool is_filler(const std::string& word, Language language) {
+    static const std::vector<std::string> en = {"and", "of", "the", "a"};
+    static const std::vector<std::string> pt = {"de", "do", "da", "e", "o", "a"};
+    const auto& list = language == Language::Portuguese ? pt : en;
+    return std::find(list.begin(), list.end(), word) != list.end();
+}
+
+// True if `words` appear in `phrase` in order and contiguously.
+bool contains_run(const std::vector<std::string>& phrase, const std::vector<std::string>& words) {
+    if (words.empty() || words.size() > phrase.size()) {
         return false;
     }
-    // Exact phrase first; otherwise the longest phrase the utterance starts with, so
-    // "iron boots please" (or a repeated phrase) still resolves.
+    for (size_t start = 0; start + words.size() <= phrase.size(); ++start) {
+        if (std::equal(words.begin(), words.end(), phrase.begin() + static_cast<long>(start))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
+bool match(std::string_view text, Language language, Command& out) {
+    // Vosk can return a whole phrase, a fragment of one ("duplo", "de falcão") or mark unknown
+    // speech with "[unk]". Drop the markers, then:
+    //   1. an exact phrase wins;
+    //   2. otherwise the words must form a run inside phrases of exactly ONE command, and contain
+    //      at least one meaningful word. Ambiguous fragments ("ferro": boots or ball?) are ignored
+    //      rather than guessed.
+    std::vector<std::string> words;
+    for (const std::string& w : split_words(normalize(text))) {
+        if (w != "[unk]") {
+            words.push_back(w);
+        }
+    }
+    if (words.empty()) {
+        return false;
+    }
+    std::string joined;
+    for (size_t i = 0; i < words.size(); ++i) {
+        joined += (i ? " " : "") + words[i];
+    }
+    // Exact phrase, or the longest phrase the utterance starts with ("iron boots iron boots").
     size_t bestLength = 0;
-    bool found = false;
     for (const CommandInfo& i : command_table()) {
         for (const std::string& phrase : phrases(i, language)) {
-            if (normalized == phrase) {
+            if (joined == phrase) {
                 out = i.command;
                 return true;
             }
-            const bool prefix = normalized.size() > phrase.size() &&
-                                normalized.compare(0, phrase.size(), phrase) == 0 &&
-                                normalized[phrase.size()] == ' ';
+            const bool prefix = joined.size() > phrase.size() &&
+                                joined.compare(0, phrase.size(), phrase) == 0 &&
+                                joined[phrase.size()] == ' ';
             if (prefix && phrase.size() > bestLength) {
                 bestLength = phrase.size();
                 out = i.command;
-                found = true;
             }
         }
+    }
+    if (bestLength > 0) {
+        return true;
+    }
+    if (std::all_of(words.begin(), words.end(),
+            [&](const std::string& w) { return is_filler(w, language); }))
+    {
+        return false;
+    }
+    bool found = false;
+    Command candidate = Command::Count;
+    for (const CommandInfo& i : command_table()) {
+        for (const std::string& phrase : phrases(i, language)) {
+            if (contains_run(split_words(phrase), words)) {
+                if (found && candidate != i.command) {
+                    return false;  // ambiguous
+                }
+                found = true;
+                candidate = i.command;
+                break;
+            }
+        }
+    }
+    if (found) {
+        out = candidate;
     }
     return found;
 }
