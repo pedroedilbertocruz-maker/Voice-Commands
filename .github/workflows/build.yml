@@ -139,6 +139,13 @@ jobs:
           status=$?
           cat merge.log
           if [ $status -ne 0 ]; then
+            mkdir -p cmp
+            for f in dist/*/*.dusk; do
+              d=cmp/$(basename $(dirname $f)); mkdir -p $d
+              unzip -p "$f" res/models/en/manifest.txt > $d/manifest.txt
+            done
+            report=$( (cd cmp && md5sum */manifest.txt && diff mod-linux-aarch64/manifest.txt mod-windows-amd64/manifest.txt | head -20 | cat -A) 2>&1 )
+            echo "::error title=manifest-diff::$(printf '%s' "$report" | sed -e ':a;N;$!ba' -e 's/%/%25/g' -e 's/\n/%0A/g')"
             echo "::error title=merge::$(tail -c 3000 merge.log | sed -e ':a;N;$!ba' -e 's/%/%25/g' -e 's/\n/%0A/g')"
           fi
           exit $status
