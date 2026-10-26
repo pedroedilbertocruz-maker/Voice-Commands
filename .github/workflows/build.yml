@@ -83,10 +83,10 @@ jobs:
               while IFS='|' read -r idx phrase; do
                 n=$((n+1))
                 if [[ $engine == google ]]; then
-                  gtts-cli -l $lang --tld $gtld "$phrase" -o $dir/$n.mp3 && \
-                    ffmpeg -loglevel error -y -i $dir/$n.mp3 -ar 16000 -ac 1 $dir/$n.wav || continue
+                  gtts-cli -l $lang --tld $gtld "$phrase" -o $dir/$n.mp3 </dev/null && \
+                    ffmpeg -nostdin -loglevel error -y -i $dir/$n.mp3 -ar 16000 -ac 1 $dir/$n.wav || continue
                 else
-                  espeak-ng -v "$espeak" -s 130 -w $dir/$n.wav "$phrase"
+                  espeak-ng -v "$espeak" -s 130 -w $dir/$n.wav "$phrase" </dev/null
                 fi
                 args+=("$dir/$n.wav=$idx")
               done < <(./build/voice_recognize "$lib" build/voice_res/models/$lang $lang --phrases)
