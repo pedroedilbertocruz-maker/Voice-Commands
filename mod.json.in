@@ -1,0 +1,7 @@
+{
+  "id": "com.pedroedilbertocruz.voice_commands",
+  "name": "Voice Commands",
+  "version": "@PROJECT_VERSION@",
+  "author": "pedroedilbertocruz-maker",
+  "description": "Say an item's name (English or Portuguese) and Link uses it, even if it is not on X or Y. Say it again to get your previous item back. Offline speech recognition (Vosk)."
+}

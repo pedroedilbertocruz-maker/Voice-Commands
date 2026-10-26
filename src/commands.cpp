@@ -1,0 +1,209 @@
+#include "commands.hpp"
+
+#include <algorithm>
+#include <cctype>
+
+namespace voice {
+
+const std::vector<CommandInfo>& command_table() {
+    // Phrases are written the way the speech models spell them: lowercase, multi-word names split
+    // into dictionary words ("claw shot"). Several aliases per item make recognition forgiving.
+    static const std::vector<CommandInfo> table = {
+        {Command::IronBoots, "Iron Boots", "Botas de Ferro",
+            {"iron boots", "iron boot", "heavy boots", "boots"},
+            {"botas de ferro", "bota de ferro", "botas", "bota"}},
+        {Command::Clawshot, "Clawshot", "Gancho",
+            {"claw shot", "clawshot", "hook shot", "hookshot", "hook"},
+            {"gancho", "garra"}},
+        {Command::DoubleClawshot, "Double Clawshots", "Gancho Duplo",
+            {"double claw shot", "double clawshot", "double claw", "double hook"},
+            {"gancho duplo", "ganchos duplos", "garra dupla"}},
+        {Command::Boomerang, "Gale Boomerang", "Bumerangue",
+            {"boomerang", "gale boomerang"},
+            {"bumerangue", "bumerangue do vento"}},
+        {Command::Bow, "Hero's Bow", "Arco",
+            {"bow", "bow and arrow", "arrows"},
+            {"arco", "arco e flecha", "flecha", "flechas"}},
+        {Command::Lantern, "Lantern", "Lanterna",
+            {"lantern", "lamp"},
+            {"lanterna", "lamparina"}},
+        {Command::Spinner, "Spinner", "Pião",
+            {"spinner"},
+            {"pião", "girador"}},
+        {Command::BallAndChain, "Ball and Chain", "Bola de Ferro",
+            {"ball and chain", "iron ball"},
+            {"bola de ferro", "bola e corrente"}},
+        {Command::DominionRod, "Dominion Rod", "Bastão do Domínio",
+            {"dominion rod", "dominion"},
+            {"bastão do domínio", "cetro do domínio", "bastão", "cetro"}},
+        {Command::Bombs, "Bombs", "Bombas",
+            {"bombs", "bomb"},
+            {"bombas", "bomba"}},
+        {Command::WaterBombs, "Water Bombs", "Bombas Aquáticas",
+            {"water bombs", "water bomb"},
+            {"bombas aquáticas", "bomba aquática", "bombas de água"}},
+        {Command::Bomblings, "Bomblings", "Bombinhas",
+            {"bomblings", "bombling", "bug bombs"},
+            {"bombinhas", "bombinha"}},
+        {Command::Slingshot, "Slingshot", "Estilingue",
+            {"slingshot", "sling shot"},
+            {"estilingue", "atiradeira", "baladeira"}},
+        {Command::FishingRod, "Fishing Rod", "Vara de Pescar",
+            {"fishing rod", "fishing"},
+            {"vara de pescar", "vara"}},
+        {Command::HawkEye, "Hawkeye", "Olho de Falcão",
+            {"hawk eye", "hawkeye"},
+            {"olho de falcão", "olho de águia"}},
+        {Command::HorseCall, "Horse Call", "Chamar Cavalo",
+            {"horse call", "horse", "epona"},
+            {"chamar cavalo", "cavalo", "epona"}},
+        {Command::Bottle, "Bottle", "Garrafa",
+            {"bottle"},
+            {"garrafa"}},
+    };
+    return table;
+}
+
+const CommandInfo& info(Command command) {
+    return command_table()[static_cast<size_t>(command)];
+}
+
+const char* display_name(Command command, Language language) {
+    const CommandInfo& i = info(command);
+    return language == Language::Portuguese ? i.display_pt : i.display_en;
+}
+
+const std::vector<std::string>& phrases(const CommandInfo& i, Language language) {
+    return language == Language::Portuguese ? i.phrases_pt : i.phrases_en;
+}
+
+std::string normalize(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    bool pendingSpace = false;
+    for (const char c : text) {
+        const unsigned char u = static_cast<unsigned char>(c);
+        if (std::isspace(u)) {
+            pendingSpace = !out.empty();
+            continue;
+        }
+        if (pendingSpace) {
+            out.push_back(' ');
+            pendingSpace = false;
+        }
+        out.push_back(u < 0x80 ? static_cast<char>(std::tolower(u)) : c);
+    }
+    return out;
+}
+
+namespace {
+
+std::vector<std::string> split_words(const std::string& phrase) {
+    std::vector<std::string> words;
+    size_t start = 0;
+    while (start < phrase.size()) {
+        const size_t end = phrase.find(' ', start);
+        const size_t stop = end == std::string::npos ? phrase.size() : end;
+        if (stop > start) {
+            words.push_back(phrase.substr(start, stop - start));
+        }
+        start = stop + 1;
+    }
+    return words;
+}
+
+std::string json_escape(const std::string& s) {
+    std::string out;
+    for (const char c : s) {
+        if (c == '"' || c == '\\') {
+            out.push_back('\\');
+        }
+        out.push_back(c);
+    }
+    return out;
+}
+
+}  // namespace
+
+std::vector<std::string> active_phrases(
+    Language language, const std::function<bool(const std::string&)>& knownWord) {
+    std::vector<std::string> out;
+    for (const CommandInfo& i : command_table()) {
+        for (const std::string& phrase : phrases(i, language)) {
+            bool ok = true;
+            if (knownWord) {
+                for (const std::string& word : split_words(phrase)) {
+                    if (!knownWord(word)) {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if (ok && std::find(out.begin(), out.end(), phrase) == out.end()) {
+                out.push_back(phrase);
+            }
+        }
+    }
+    return out;
+}
+
+std::string grammar_json(const std::vector<std::string>& list) {
+    std::string json = "[";
+    for (const std::string& phrase : list) {
+        json += "\"" + json_escape(phrase) + "\", ";
+    }
+    json += "\"[unk]\"]";
+    return json;
+}
+
+bool match(std::string_view text, Language language, Command& out) {
+    const std::string normalized = normalize(text);
+    if (normalized.empty() || normalized == "[unk]") {
+        return false;
+    }
+    // Exact phrase first; otherwise the longest phrase the utterance starts with, so
+    // "iron boots please" (or a repeated phrase) still resolves.
+    size_t bestLength = 0;
+    bool found = false;
+    for (const CommandInfo& i : command_table()) {
+        for (const std::string& phrase : phrases(i, language)) {
+            if (normalized == phrase) {
+                out = i.command;
+                return true;
+            }
+            const bool prefix = normalized.size() > phrase.size() &&
+                                normalized.compare(0, phrase.size(), phrase) == 0 &&
+                                normalized[phrase.size()] == ' ';
+            if (prefix && phrase.size() > bestLength) {
+                bestLength = phrase.size();
+                out = i.command;
+                found = true;
+            }
+        }
+    }
+    return found;
+}
+
+std::string result_text(std::string_view json) {
+    const size_t key = json.find("\"text\"");
+    if (key == std::string_view::npos) {
+        return {};
+    }
+    const size_t open = json.find('"', json.find(':', key) + 1);
+    if (open == std::string_view::npos) {
+        return {};
+    }
+    std::string out;
+    for (size_t i = open + 1; i < json.size(); ++i) {
+        if (json[i] == '\\' && i + 1 < json.size()) {
+            out.push_back(json[++i]);
+        } else if (json[i] == '"') {
+            return out;
+        } else {
+            out.push_back(json[i]);
+        }
+    }
+    return {};
+}
+
+}  // namespace voice
