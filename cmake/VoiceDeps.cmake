@@ -86,7 +86,10 @@ if (VOICE_BUNDLE_MODELS)
             file(GLOB_RECURSE _files RELATIVE "${_dest}" "${_dest}/*")
             list(SORT _files)
             list(JOIN _files "\n" _list)
-            file(WRITE "${_dest}/manifest.txt" "${_name}\n${_list}\n")
+            # Force LF: the manifest must be byte-identical across platforms so the per-platform
+            # bundles can be merged (file(WRITE) produces CRLF on Windows).
+            file(CONFIGURE OUTPUT "${_dest}/manifest.txt" CONTENT "${_name}\n${_list}\n"
+                    NEWLINE_STYLE UNIX)
         endif ()
     endforeach ()
 else ()
