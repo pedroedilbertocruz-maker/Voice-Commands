@@ -37,8 +37,10 @@ public:
     bool load_library(const std::string& native_dir);
     bool library_loaded() const;
 
-    // (Re)starts listening with the model in `model_dir`. Safe to call again to switch language.
-    void start(const std::string& model_dir, Language language);
+    // (Re)starts listening with the model in `model_dir` on the named capture device ("" = system
+    // default). Safe to call again to switch language or microphone; the model is kept loaded
+    // when only the microphone changes.
+    void start(const std::string& model_dir, Language language, const std::string& device);
     // Stops listening and releases the model and microphone.
     void stop();
     // Stops everything and unloads the library; call from mod_shutdown.
@@ -50,6 +52,13 @@ public:
     EngineStatus status() const { return m_status.load(); }
     // Number of grammar phrases the model accepted (others contain unknown words).
     int phrase_count() const { return m_phraseCount.load(); }
+    // Peak input level of the most recent audio buffer, 0..1.
+    float input_level() const { return m_level.load(); }
+    // True when the chosen microphone was not found and the system default is used instead.
+    bool using_fallback_device() const { return m_fallback.load(); }
+
+    // Names of the capture devices currently available. Blocking; call from UI actions only.
+    static std::vector<std::string> list_microphones();
 
     // Audio callback entry point (miniaudio thread).
     void on_audio(const int16_t* samples, uint32_t count);
@@ -60,11 +69,13 @@ private:
         bool run = false;
         std::string modelDir;
         Language language = Language::English;
+        std::string device;
         uint64_t generation = 0;
     };
 
     void worker_main();
     void run_session(const Request& request);
+    void release_model();
 
     Api* m_api = nullptr;
     void* m_lib = nullptr;
@@ -84,6 +95,12 @@ private:
 
     std::atomic<EngineStatus> m_status{EngineStatus::Off};
     std::atomic<int> m_phraseCount{0};
+    std::atomic<float> m_level{0.0f};
+    std::atomic<bool> m_fallback{false};
+
+    // Worker-thread only: model cache so switching microphones does not reload it.
+    void* m_model = nullptr;
+    std::string m_modelDir;
 };
 
 const char* status_text(EngineStatus status, Language language);

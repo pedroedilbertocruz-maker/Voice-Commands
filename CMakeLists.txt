@@ -7,7 +7,7 @@ if (NOT DEFINED CMAKE_BUILD_TYPE AND NOT DEFINED ENV{CMAKE_BUILD_TYPE})
     set(CMAKE_BUILD_TYPE "RelWithDebInfo" CACHE STRING "Build type")
 endif ()
 
-project(voice_commands VERSION 0.1.0 LANGUAGES CXX)
+project(voice_commands VERSION 0.2.0 LANGUAGES CXX)
 
 option(VOICE_BUNDLE_MODELS "Download the English and Portuguese speech models into the mod" ON)
 option(VOICE_BUILD_TESTS "Build the offline recognition test tool" OFF)

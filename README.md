@@ -41,6 +41,7 @@ A lista completa de frases aparece no painel do mod, em **Settings and Commands*
 
 - **Voice Commands:** liga ou desliga o microfone.
 - **Language:** English ou Português. Cada idioma tem o próprio modelo de voz.
+- **Microfone:** escolha qual microfone usar ("Padrão do sistema" segue o microfone padrão do Windows/Linux). A barra de **nível de entrada** mostra se ele está captando sua voz. Se plugar um microfone novo, use **Atualizar lista de microfones**. O mod guarda o microfone pelo nome, então a escolha continua valendo mesmo que a ordem dos dispositivos mude. Se o microfone escolhido estiver desconectado, o mod usa o padrão e avisa no status.
 - **Item Button:** o botão que recebe os itens chamados por voz. Em **Auto**, o mod usa um botão vazio se houver, senão o X.
 - **Show What Was Understood:** mostra uma notificação com o item reconhecido.
 - **Test Without Microphone:** botões para testar cada item sem falar.

@@ -30,6 +30,7 @@
 #include "voice_engine.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -61,9 +62,14 @@ ConfigVarHandle g_cvarVoice = 0;      // bool
 ConfigVarHandle g_cvarLanguage = 0;   // 0 English, 1 Portuguese
 ConfigVarHandle g_cvarButton = 0;     // 0 Auto, 1 X, 2 Y
 ConfigVarHandle g_cvarFeedback = 0;   // bool: toast what was understood
+ConfigVarHandle g_cvarMicrophone = 0; // string: capture device name, "" = system default
 
 UiWindowHandle g_window = 0;
 UiElementHandle g_statusText = 0;
+UiElementHandle g_panelMicSelect = 0;
+UiElementHandle g_panelLevel = 0;
+UiElementHandle g_settingsMicSelect = 0;
+UiElementHandle g_settingsLevel = 0;
 
 voice::Engine g_engine;
 
@@ -89,6 +95,22 @@ Language language() {
 
 bool pt() {
     return language() == Language::Portuguese;
+}
+
+std::string microphone() {
+    if (g_cvarMicrophone == 0) {
+        return {};
+    }
+    size_t length = 0;
+    if (svc_config->get_string(mod_ctx, g_cvarMicrophone, nullptr, 0, &length) != MOD_OK) {
+        return {};
+    }
+    std::string value(length + 1, '\0');
+    if (svc_config->get_string(mod_ctx, g_cvarMicrophone, value.data(), value.size(), nullptr) != MOD_OK) {
+        return {};
+    }
+    value.resize(length);
+    return value;
 }
 
 void toast(const std::string& title, const std::string& body, uint32_t ms = 2000) {
@@ -356,6 +378,7 @@ struct ModelInstall {
 ModelInstall g_install;
 bool g_wantVoice = false;
 Language g_activeLanguage = Language::English;
+std::string g_activeMicrophone;
 
 std::string read_resource(const std::string& path, bool& ok) {
     ResourceBuffer buf = RESOURCE_BUFFER_INIT;
@@ -459,15 +482,19 @@ void update_voice() {
         g_engine.stop();
         begin_model_install(l);
     }
+    const std::string mic = microphone();
     if (g_install.state == ModelInstall::State::Copying) {
         tick_model_install();
         if (g_install.state == ModelInstall::State::Ready) {
-            g_engine.start(g_install.targetDir, l);
+            g_activeMicrophone = mic;
+            g_engine.start(g_install.targetDir, l, mic);
         }
     } else if (g_install.state == ModelInstall::State::Ready &&
-               g_engine.status() == voice::EngineStatus::Off)
+               (g_engine.status() == voice::EngineStatus::Off || mic != g_activeMicrophone))
     {
-        g_engine.start(g_install.targetDir, l);
+        // First start, or the microphone was changed in the menu (the model stays loaded).
+        g_activeMicrophone = mic;
+        g_engine.start(g_install.targetDir, l, mic);
     }
 
     std::string heard;
@@ -503,8 +530,113 @@ std::string status_line() {
     std::string s = std::string("Status: ") + voice::status_text(g_engine.status(), language());
     if (g_engine.status() == voice::EngineStatus::Listening) {
         s += pt() ? " (português)" : " (English)";
+        if (g_engine.using_fallback_device()) {
+            s += pt() ? " - microfone escolhido não encontrado, usando o padrão" :
+                        " - chosen microphone not found, using the default";
+        }
     }
     return s;
+}
+
+// --- Microphone picker ---------------------------------------------------------------------
+// Devices are stored by name: their position in the list changes when something is plugged in.
+// Entry 0 is always the system default.
+
+std::vector<std::string> g_micNames;   // index 0 = "" (system default)
+std::vector<std::string> g_micLabels;  // shown in the menu
+bool g_micListed = false;
+
+void refresh_microphone_list() {
+    const std::string saved = microphone();
+    g_micNames.assign(1, std::string());
+    g_micLabels.assign(1, pt() ? "Padrão do sistema" : "System default");
+    for (std::string& name : voice::Engine::list_microphones()) {
+        g_micLabels.push_back(name);
+        g_micNames.push_back(std::move(name));
+    }
+    // Keep a saved but unplugged microphone visible so the setting is not silently lost.
+    if (!saved.empty() && std::find(g_micNames.begin(), g_micNames.end(), saved) == g_micNames.end()) {
+        g_micNames.push_back(saved);
+        g_micLabels.push_back(saved + (pt() ? " (desconectado)" : " (disconnected)"));
+    }
+    g_micListed = true;
+}
+
+std::vector<const char*> mic_label_ptrs() {
+    std::vector<const char*> out;
+    for (const std::string& label : g_micLabels) {
+        out.push_back(label.c_str());
+    }
+    return out;
+}
+
+void apply_mic_options(UiElementHandle control) {
+    if (control == 0) {
+        return;
+    }
+    std::vector<UiControlOption> options;
+    for (const std::string& label : g_micLabels) {
+        UiControlOption o = UI_CONTROL_OPTION_INIT;
+        o.label = label.c_str();
+        options.push_back(o);
+    }
+    svc_ui->control_set_options(mod_ctx, control, options.data(), options.size());
+}
+
+void on_mic_get(ModContext*, void*, UiControlValue* out) {
+    const std::string saved = microphone();
+    const auto it = std::find(g_micNames.begin(), g_micNames.end(), saved);
+    out->int_value = it == g_micNames.end() ? 0 : static_cast<int64_t>(it - g_micNames.begin());
+}
+
+void on_mic_set(ModContext*, void*, const UiControlValue* value) {
+    const int64_t index = value->int_value;
+    if (index < 0 || index >= static_cast<int64_t>(g_micNames.size())) {
+        return;
+    }
+    svc_config->set_string(mod_ctx, g_cvarMicrophone, g_micNames[static_cast<size_t>(index)].c_str());
+}
+
+void on_refresh_microphones(ModContext*, void*) {
+    refresh_microphone_list();
+    apply_mic_options(g_panelMicSelect);
+    apply_mic_options(g_settingsMicSelect);
+}
+
+UiElementHandle add_mic_select(UiElementHandle pane, const char* help) {
+    if (!g_micListed) {
+        refresh_microphone_list();
+    }
+    const std::vector<const char*> labels = mic_label_ptrs();
+    UiControlDesc c = UI_CONTROL_DESC_INIT;
+    c.kind = UI_CONTROL_SELECT;
+    c.label = pt() ? "Microfone" : "Microphone";
+    c.help_rml = help;
+    c.binding = UI_BINDING_CALLBACKS;
+    c.get = on_mic_get;
+    c.set = on_mic_set;
+    c.options = labels.data();
+    c.option_count = labels.size();
+    UiElementHandle handle = 0;
+    svc_ui->pane_add_control(mod_ctx, pane, &c, &handle);
+    return handle;
+}
+
+void add_refresh_button(UiElementHandle pane) {
+    UiControlDesc c = UI_CONTROL_DESC_INIT;
+    c.kind = UI_CONTROL_BUTTON;
+    c.label = pt() ? "Atualizar lista de microfones" : "Refresh microphone list";
+    c.on_pressed = on_refresh_microphones;
+    svc_ui->pane_add_control(mod_ctx, pane, &c, nullptr);
+}
+
+// Input level meter: lets the player confirm the chosen microphone actually hears them.
+float g_levelShown = 0.0f;
+
+float displayed_level() {
+    const float level = g_engine.status() == voice::EngineStatus::Listening ? g_engine.input_level() : 0.0f;
+    g_levelShown = std::max(level, g_levelShown * 0.85f);  // fast attack, slow release
+    return std::min(1.0f, std::sqrt(g_levelShown));        // sqrt so normal speech fills the bar
 }
 
 void add_control(UiElementHandle pane, const UiControlDesc& d) {
@@ -553,6 +685,15 @@ ModResult build_settings_tab(
     add_toggle(left, "Show What Was Understood", g_cvarFeedback,
         "Shows a short notification with the item that was recognized.");
 
+    svc_ui->pane_add_section(mod_ctx, left, pt() ? "Microfone" : "Microphone");
+    g_settingsMicSelect = add_mic_select(left,
+        "Microphone used for voice commands. Use the level bar below to check it hears you; "
+        "refresh the list after plugging in a new device.");
+    add_refresh_button(left);
+    svc_ui->pane_add_text(mod_ctx, left, pt() ? "Nível de entrada:" : "Input level:", nullptr);
+    g_settingsLevel = 0;
+    svc_ui->pane_add_progress(mod_ctx, left, 0.0f, &g_settingsLevel);
+
     svc_ui->pane_add_section(mod_ctx, left, "Test Without Microphone");
     for (const voice::CommandInfo& info : voice::command_table()) {
         UiControlDesc c = UI_CONTROL_DESC_INIT;
@@ -577,6 +718,15 @@ ModResult build_settings_tab(
 
 void on_window_closed(ModContext*, UiWindowHandle, void*) {
     g_window = 0;
+    g_settingsMicSelect = 0;
+    g_settingsLevel = 0;
+}
+
+ModResult update_settings_tab(ModContext*, void*, ModError*) {
+    if (g_settingsLevel != 0) {
+        svc_ui->elem_set_progress(mod_ctx, g_settingsLevel, displayed_level());
+    }
+    return MOD_OK;
 }
 
 void on_open_settings(ModContext*, void*) {
@@ -586,6 +736,7 @@ void on_open_settings(ModContext*, void*) {
     UiTabDesc tabs[1] = {UI_TAB_DESC_INIT};
     tabs[0].title = "Voice Commands";
     tabs[0].build = build_settings_tab;
+    tabs[0].update = update_settings_tab;
     UiWindowDesc desc = UI_WINDOW_DESC_INIT;
     desc.tabs = tabs;
     desc.tab_count = 1;
@@ -596,8 +747,11 @@ void on_open_settings(ModContext*, void*) {
 ModResult build_panel(ModContext*, UiElementHandle panel, void*, ModError*) {
     add_toggle(panel, "Voice Commands", g_cvarVoice, nullptr);
     add_select(panel, "Language", g_cvarLanguage, kLanguages, 2, nullptr);
+    g_panelMicSelect = add_mic_select(panel, nullptr);
     g_statusText = 0;
     svc_ui->pane_add_text(mod_ctx, panel, status_line().c_str(), &g_statusText);
+    g_panelLevel = 0;
+    svc_ui->pane_add_progress(mod_ctx, panel, 0.0f, &g_panelLevel);
     UiControlDesc c = UI_CONTROL_DESC_INIT;
     c.kind = UI_CONTROL_BUTTON;
     c.label = "Settings and Commands";
@@ -610,6 +764,9 @@ ModResult update_panel(ModContext*, void*, ModError*) {
     if (g_statusText != 0) {
         svc_ui->elem_set_text(mod_ctx, g_statusText, status_line().c_str());
     }
+    if (g_panelLevel != 0 && g_settingsLevel == 0) {  // the settings window updates it otherwise
+        svc_ui->elem_set_progress(mod_ctx, g_panelLevel, displayed_level());
+    }
     return MOD_OK;
 }
 
@@ -618,7 +775,9 @@ ModResult register_var(const char* name, ConfigVarType type, int64_t def, Config
     ConfigVarDesc d = CONFIG_VAR_DESC_INIT;
     d.name = name;
     d.type = type;
-    if (type == CONFIG_VAR_BOOL) {
+    if (type == CONFIG_VAR_STRING) {
+        d.default_string = "";
+    } else if (type == CONFIG_VAR_BOOL) {
         d.default_bool = def != 0;
     } else {
         d.default_int = def;
@@ -638,7 +797,8 @@ MOD_EXPORT ModResult mod_initialize(ModError* error) {
     if ((r = register_var("voiceEnabled", CONFIG_VAR_BOOL, 1, g_cvarVoice, error)) != MOD_OK ||
         (r = register_var("language", CONFIG_VAR_INT, 0, g_cvarLanguage, error)) != MOD_OK ||
         (r = register_var("itemButton", CONFIG_VAR_INT, 0, g_cvarButton, error)) != MOD_OK ||
-        (r = register_var("showFeedback", CONFIG_VAR_BOOL, 1, g_cvarFeedback, error)) != MOD_OK)
+        (r = register_var("showFeedback", CONFIG_VAR_BOOL, 1, g_cvarFeedback, error)) != MOD_OK ||
+        (r = register_var("microphone", CONFIG_VAR_STRING, 0, g_cvarMicrophone, error)) != MOD_OK)
     {
         return r;
     }
@@ -676,8 +836,13 @@ MOD_EXPORT ModResult mod_shutdown(ModError*) {
     g_install = ModelInstall{};
     g_wantVoice = false;
     g_window = 0;
-    g_statusText = 0;
-    g_cvarVoice = g_cvarLanguage = g_cvarButton = g_cvarFeedback = 0;
+    g_statusText = g_panelMicSelect = g_panelLevel = g_settingsMicSelect = g_settingsLevel = 0;
+    g_micNames.clear();
+    g_micLabels.clear();
+    g_micListed = false;
+    g_activeMicrophone.clear();
+    g_levelShown = 0.0f;
+    g_cvarVoice = g_cvarLanguage = g_cvarButton = g_cvarFeedback = g_cvarMicrophone = 0;
     return MOD_OK;
 }
 }

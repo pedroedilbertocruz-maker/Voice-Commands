@@ -2,6 +2,7 @@
 
 #include "miniaudio.h"
 
+#include <algorithm>
 #include <chrono>
 #include <type_traits>
 
@@ -138,7 +139,7 @@ bool Engine::library_loaded() const {
     return m_api != nullptr;
 }
 
-void Engine::start(const std::string& modelDir, Language language) {
+void Engine::start(const std::string& modelDir, Language language, const std::string& device) {
     if (m_api == nullptr) {
         return;
     }
@@ -146,6 +147,7 @@ void Engine::start(const std::string& modelDir, Language language) {
     m_request.run = true;
     m_request.modelDir = modelDir;
     m_request.language = language;
+    m_request.device = device;
     ++m_request.generation;
     m_status = EngineStatus::LoadingModel;
     m_cv.notify_all();
@@ -192,6 +194,12 @@ bool Engine::poll(std::string& text) {
 }
 
 void Engine::on_audio(const int16_t* samples, uint32_t count) {
+    int peak = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        const int v = samples[i] < 0 ? -static_cast<int>(samples[i]) : samples[i];
+        peak = v > peak ? v : peak;
+    }
+    m_level = static_cast<float>(peak) / 32768.0f;
     {
         std::lock_guard lock(m_audioMutex);
         if (!m_capturing) {
@@ -215,6 +223,8 @@ void Engine::worker_main() {
             std::unique_lock lock(m_mutex);
             m_cv.wait(lock, [&] { return m_quit || m_request.generation != handled; });
             if (m_quit) {
+                lock.unlock();
+                release_model();
                 return;
             }
             request = m_request;
@@ -223,18 +233,53 @@ void Engine::worker_main() {
         if (request.run) {
             run_session(request);
         } else {
+            release_model();
             m_status = EngineStatus::Off;
         }
+        m_level = 0.0f;
     }
 }
 
-void Engine::run_session(const Request& request) {
-    m_status = EngineStatus::LoadingModel;
-    Api::VoskModel* model = m_api->model_new(request.modelDir.c_str());
-    if (model == nullptr) {
-        m_status = EngineStatus::NoModel;
-        return;
+void Engine::release_model() {
+    if (m_model != nullptr) {
+        m_api->model_free(static_cast<Api::VoskModel*>(m_model));
+        m_model = nullptr;
     }
+    m_modelDir.clear();
+}
+
+std::vector<std::string> Engine::list_microphones() {
+    std::vector<std::string> names;
+    ma_context context;
+    if (ma_context_init(nullptr, 0, nullptr, &context) != MA_SUCCESS) {
+        return names;
+    }
+    ma_device_info* capture = nullptr;
+    ma_uint32 captureCount = 0;
+    if (ma_context_get_devices(&context, nullptr, nullptr, &capture, &captureCount) == MA_SUCCESS) {
+        for (ma_uint32 i = 0; i < captureCount; ++i) {
+            std::string name = capture[i].name;
+            if (!name.empty() && std::find(names.begin(), names.end(), name) == names.end()) {
+                names.push_back(std::move(name));
+            }
+        }
+    }
+    ma_context_uninit(&context);
+    return names;
+}
+
+void Engine::run_session(const Request& request) {
+    if (m_model == nullptr || m_modelDir != request.modelDir) {
+        m_status = EngineStatus::LoadingModel;
+        release_model();
+        m_model = m_api->model_new(request.modelDir.c_str());
+        if (m_model == nullptr) {
+            m_status = EngineStatus::NoModel;
+            return;
+        }
+        m_modelDir = request.modelDir;
+    }
+    Api::VoskModel* model = static_cast<Api::VoskModel*>(m_model);
 
     const std::vector<std::string> phrases = active_phrases(request.language,
         [&](const std::string& word) { return m_api->model_find_word(model, word.c_str()) >= 0; });
@@ -242,19 +287,41 @@ void Engine::run_session(const Request& request) {
     const std::string grammar = grammar_json(phrases);
     Api::VoskRecognizer* recognizer = m_api->recognizer_new_grm(model, kSampleRate, grammar.c_str());
     if (recognizer == nullptr) {
-        m_api->model_free(model);
+        release_model();
         m_status = EngineStatus::NoModel;
         return;
     }
 
+    // Find the requested microphone by name; fall back to the system default if it is gone.
+    ma_context context;
+    const bool contextOk = ma_context_init(nullptr, 0, nullptr, &context) == MA_SUCCESS;
+    ma_device_id deviceId{};
+    bool haveDeviceId = false;
+    if (contextOk && !request.device.empty()) {
+        ma_device_info* capture = nullptr;
+        ma_uint32 captureCount = 0;
+        if (ma_context_get_devices(&context, nullptr, nullptr, &capture, &captureCount) == MA_SUCCESS) {
+            for (ma_uint32 i = 0; i < captureCount; ++i) {
+                if (request.device == capture[i].name) {
+                    deviceId = capture[i].id;
+                    haveDeviceId = true;
+                    break;
+                }
+            }
+        }
+    }
+    m_fallback = !request.device.empty() && !haveDeviceId;
+
     ma_device_config config = ma_device_config_init(ma_device_type_capture);
+    config.capture.pDeviceID = haveDeviceId ? &deviceId : nullptr;
     config.capture.format = ma_format_s16;
     config.capture.channels = 1;
     config.sampleRate = static_cast<ma_uint32>(kSampleRate);
     config.dataCallback = on_capture;
     config.pUserData = this;
     ma_device device;
-    const bool deviceOk = ma_device_init(nullptr, &config, &device) == MA_SUCCESS;
+    const bool deviceOk =
+        ma_device_init(contextOk ? &context : nullptr, &config, &device) == MA_SUCCESS;
     if (deviceOk) {
         {
             std::lock_guard lock(m_audioMutex);
@@ -275,8 +342,10 @@ void Engine::run_session(const Request& request) {
         if (deviceOk) {
             ma_device_uninit(&device);
         }
+        if (contextOk) {
+            ma_context_uninit(&context);
+        }
         m_api->recognizer_free(recognizer);
-        m_api->model_free(model);
         m_status = EngineStatus::NoMicrophone;
         return;
     }
@@ -320,8 +389,10 @@ void Engine::run_session(const Request& request) {
         m_audio.clear();
     }
     ma_device_uninit(&device);
+    if (contextOk) {
+        ma_context_uninit(&context);
+    }
     m_api->recognizer_free(recognizer);
-    m_api->model_free(model);
     m_status = EngineStatus::Off;
 }
 
